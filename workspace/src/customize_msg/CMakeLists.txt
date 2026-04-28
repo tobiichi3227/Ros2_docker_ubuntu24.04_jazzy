@@ -10,7 +10,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 rosidl_generate_interfaces(customize_msg
-  "msg/slider.msg"
+  "msg/Slider.msg"
 )
 
 # further dependencies manually.
