@@ -13,15 +13,22 @@ import joblib
 from sklearn.preprocessing import StandardScaler
 import os
 from geometry_msgs.msg import Point
+import math
 class State(Node):
     def __init__(self):
         super().__init__('state')
 
-        model_path = "/workspace/src/mlp_model.pkl"
-        scaler_path = "/workspace/src/scaler.pkl"
-
+        model_path = "/workspace/src/model.pkl"
+     ##   scaler_path = "/workspace/src/scaler.pkl"
+        self.x_boundary_min = -0.1494
+        self.x_boundary_max =  0.1494
+        self.z_boundary_min = -0.1182
+        self.z_boundary_max =  0.1182
+        self.ball_radius = 0.02   
+        self.bottom_board_y = 0.042
+        self.top_board_y = 0.312
         self.model = joblib.load(model_path)
-        self.scaler = joblib.load(scaler_path)
+       ## self.scaler = joblib.load(scaler_path)
         self.mode = None
         self.ball_p = [0.0,0.0,0.0]
         self.ball_p = [0.0,0.0,0.0]
@@ -93,8 +100,35 @@ class State(Node):
                     self.ball_v[i] = 1.0
                 elif self.ball_v[i] < 0:
                     self.ball_v[i] = -1.0
-            self.ai_control_timer = self.create_timer(0.1, self.update_ai_control)
+            self.ai_control_timer = self.create_timer(0.001, self.update_ai_control)
             self.update_ai_control()
+
+
+    def update_math_control(self):
+
+        if self.ball_v[1] > 0:
+            target_y = self.top_board_y
+        elif self.ball_v[1] < 0:
+            target_y = self.bottom_board_y
+        else:
+            return  
+
+        result = predict_landing_with_walls_and_radius(
+            self.ball_p[0], self.ball_p[1], self.ball_p[2],
+            self.ball_v[0], self.ball_v[1], self.ball_v[2],
+            target_y,
+            self.x_boundary_min, self.x_boundary_max,
+            self.z_boundary_min, self.z_boundary_max,
+            self.ball_radius
+        )
+
+        if result[0] is None:
+            self.get_logger().warn(f"none(target_y={target_y})")
+            return
+
+        self.goal_ball = result  # (x, y, z)
+        self.get_logger().info(f"predic: x={result[0]:.3f}, z={result[2]:.3f}")
+        self.auto_go_to_goal()
     def update_ai_control(self):
  
         goal = self.predict_landing_position(
@@ -102,7 +136,6 @@ class State(Node):
             self.ball_v[0], self.ball_v[1], self.ball_v[2]
         )
         self.goal_ball = goal
-        self.get_logger().debug(f"AI update: landX={goal[0]:.2f}, landY={goal[1]:.2f}, landZ={goal[2]:.2f}")
         self.auto_go_to_goal()
     def start_keyboard_listener(self):
         if self.keyboard_thread and self.keyboard_thread.is_alive():
@@ -161,10 +194,15 @@ class State(Node):
         if self.mode == 'manual':
             return   
         self.get_logger().info(
-            f'ball=({self.ball_p[0]:.3f}, {self.ball_p[1]:.3f}, {self.ball_p[2]:.3f}), '
-            f'vx={self.ball_v[0]:.3f}, vy={self.ball_v[1]:.3f}, vz={self.ball_v[2]:.3f}, '
-            f's1={self.s1:.3f}, s2={self.s2:.3f}'
+            f"input: px={self.ball_p[0]:.5f}, py={self.ball_p[1]:.5f}, pz={self.ball_p[2]:.5f}, "
+            f"vx={self.ball_v[0]:.5f}, vy={self.ball_v[1]:.5f}, vz={self.ball_v[2]:.5f}"
         )
+        self.get_logger().info(f"AI update: landX={self.goal_ball[0]:.5f}, landY={self.goal_ball[1]:.5f}, landZ={self.goal_ball[2]:.5f}")
+        # self.get_logger().info(
+        #     f'ball=({self.ball_p[0]:.3f}, {self.ball_p[1]:.3f}, {self.ball_p[2]:.3f}), '
+        #     f'vx={self.ball_v[0]:.3f}, vy={self.ball_v[1]:.3f}, vz={self.ball_v[2]:.3f}, '
+        #     f's1={self.s1:.3f}, s2={self.s2:.3f}'
+        # )
 #=== publish===
     def publish_goal(self, goal_name: str, value: float):
         if goal_name in self.goal_pubs:
@@ -172,16 +210,39 @@ class State(Node):
             msg.data = value
             self.goal_pubs[goal_name].publish(msg)
     def predict_landing_position(self,posX, posY, posZ, velX, velY, velZ):
-        
-
+        def binarize(v):
+            return 1 if v > 0 else -1
+        vx, vy, vz = map(binarize, [velX, velY, velZ])
+        dir_class = self.encode_direction(vx, vy, vz)
         
         # 標準化
-        input_array = np.array([[posX, posY, posZ, velX, velY, velZ]])
-        input_scaled = self.scaler.transform(input_array)
-        prediction = self.model.predict(input_scaled)
-        return (round(prediction[0,0], 2),
-                round(prediction[0,1], 2),
-                round(prediction[0,2], 2))
+        input_array = np.array([[posX, posY, posZ, dir_class]])
+        #input_scaled = self.scaler.transform(input_array)
+        prediction = self.model.predict(input_array)
+        return (
+            prediction[0,0],
+            prediction[0,1],
+            prediction[0,2]
+        )
+    def encode_direction(self,vx, vy, vz):
+        if vx == 1 and vy == 1 and vz == 1:
+            return 1
+        elif vx == 1 and vy == 1 and vz == -1:
+            return 2
+        elif vx == 1 and vy == -1 and vz == 1:
+            return 3
+        elif vx == -1 and vy == 1 and vz == 1:
+            return 4
+        elif vx == -1 and vy == -1 and vz == 1:
+            return 5
+        elif vx == -1 and vy == 1 and vz == -1:
+            return 6
+        elif vx == 1 and vy == -1 and vz == -1:
+            return 7
+        elif vx == -1 and vy == -1 and vz == -1:
+            return 8
+        else:
+            return 0
     def auto_go_to_goal(self):
         x, y, z = self.goal_ball
         goal_1=z
@@ -203,6 +264,46 @@ class State(Node):
                 self.goal_s3=goal_2   
         for name in ['goal_s1','goal_s2','goal_s3','goal_s4','goal_s5','goal_s6']:
             self.publish_goal(name, getattr(self, name))
+
+
+    def predict_landing_with_walls_and_radius(posX, posY, posZ, velX, velY, velZ, target_y,
+                                            x_boundary_min, x_boundary_max,
+                                            z_boundary_min, z_boundary_max,
+                                            ball_radius=0.02):
+
+        if abs(velY) < 1e-6:
+            return (None, None, None)
+
+        t = (target_y - posY) / velY
+        if t <= 0:
+            return (None, None, None)
+
+        # 有效活动范围（球心可达）
+        x_min_eff = x_boundary_min + ball_radius
+        x_max_eff = x_boundary_max - ball_radius
+        z_min_eff = z_boundary_min + ball_radius
+        z_max_eff = z_boundary_max - ball_radius
+
+        def reflect_1d(p, v, low, high, dt):
+            span = high - low
+            if span <= 0:
+                return p + v * dt   # 退化为无反射（异常情况）
+            p_abs = p + v * dt
+            offset = p_abs - low
+            # 处理正负周期的 floor
+            if offset >= 0:
+                cycles = int(offset / span)
+            else:
+                cycles = -int((-offset) / span) - 1 if offset % span != 0 else -int((-offset) / span)
+            remainder = offset - cycles * span
+            if cycles % 2 == 0:
+                return low + remainder
+            else:
+                return high - remainder
+
+        landX = reflect_1d(posX, velX, x_min_eff, x_max_eff, t)
+        landZ = reflect_1d(posZ, velZ, z_min_eff, z_max_eff, t)
+        return (landX, target_y, landZ)
 def main():
     rclpy.init()
     while True:
@@ -215,8 +316,11 @@ def main():
             elif choice == 'm':
                 node.set_mode('manual')
                 break
+            elif choice == 'mm':
+                node.set_mode('math')
+                break
             else:
-                print("not accept (a / m)")
+                print("not accept (a / m/mm)")
 
       
         executor = SingleThreadedExecutor()
