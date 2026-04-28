@@ -12,12 +12,13 @@ import pandas as pd
 import joblib
 from sklearn.preprocessing import StandardScaler
 import os
+from geometry_msgs.msg import Point
 class State(Node):
     def __init__(self):
         super().__init__('state')
-        base_dir = os.path.dirname(__file__)
-        model_path = os.path.join(base_dir, "mlp_model.pkl")
-        scaler_path = os.path.join(base_dir, "scaler.pkl")
+
+        model_path = "/workspace/src/mlp_model.pkl"
+        scaler_path = "/workspace/src/scaler.pkl"
 
         self.model = joblib.load(model_path)
         self.scaler = joblib.load(scaler_path)
@@ -36,7 +37,7 @@ class State(Node):
         self.create_subscription(Float32, '/ball_vx', self.vx_cb, 10)
         self.create_subscription(Float32, '/ball_vy', self.vy_cb, 10)
         self.create_subscription(Float32, '/ball_vz', self.vz_cb, 10)
-        self.create_subscription(Float32, '/ball_position', self.ball_cb, 10)
+        self.create_subscription(Point, '/ball_position', self.ball_cb, 10)
         self.create_subscription(Float32, '/down_plus', self.s1_cb, 10)
         self.create_subscription(Float32, '/down_min', self.s2_cb, 10)
         self.create_subscription(Float32, '/down_minus', self.s3_cb, 10)
@@ -55,7 +56,8 @@ class State(Node):
         self.debug_timer = self.create_timer(1.0, self.debug_print)
 
     # ----- callbacks -----
-    def ball_cb(self, msg): self.ball_p = msg.data
+    def ball_cb(self, msg: Point):
+        self.ball_p = [msg.x, msg.y, msg.z]
     def vx_cb(self, msg): self.ball_v[0] = msg.data
     def vy_cb(self, msg): self.ball_v[1] = msg.data
     def vz_cb(self, msg): self.ball_v[2] = msg.data
@@ -83,9 +85,17 @@ class State(Node):
         elif mode == 'ai':
             if self.debug_timer is None:
                 self.debug_timer = self.create_timer(1.0, self.debug_print)
-            self.goal_ball=predict_landing_position(self.ball_p[0],self.ball_p[1],self.ball_p[2],self.ball_v[0],self.ball_v[1],self.ball_v[2])
-            self.auto_go_to_goal()
-
+        self.ai_control_timer = self.create_timer(0.1, self.update_ai_control)
+        self.update_ai_control()
+    def update_ai_control(self):
+        # 使用最新的 ball_p 和 ball_v 进行预测
+        goal = self.predict_landing_position(
+            self.ball_p[0], self.ball_p[1], self.ball_p[2],
+            self.ball_v[0], self.ball_v[1], self.ball_v[2]
+        )
+        self.goal_ball = goal
+        self.get_logger().debug(f"AI update: landX={goal[0]:.2f}, landY={goal[1]:.2f}, landZ={goal[2]:.2f}")
+        self.auto_go_to_goal()
     def start_keyboard_listener(self):
         if self.keyboard_thread and self.keyboard_thread.is_alive():
             return
@@ -142,7 +152,8 @@ class State(Node):
         if self.mode == 'manual':
             return   
         self.get_logger().info(
-            f'ball={self.ball_p:.3f}, vx={self.ball_v[0]:.3f}, vy={self.ball_v[1]:.3f}, vz={self.ball_v[2]:.3f}, '
+            f'ball=({self.ball_p[0]:.3f}, {self.ball_p[1]:.3f}, {self.ball_p[2]:.3f}), '
+            f'vx={self.ball_v[0]:.3f}, vy={self.ball_v[1]:.3f}, vz={self.ball_v[2]:.3f}, '
             f's1={self.s1:.3f}, s2={self.s2:.3f}'
         )
 #=== publish===
@@ -151,35 +162,38 @@ class State(Node):
             msg = Float32()
             msg.data = value
             self.goal_pubs[goal_name].publish(msg)
-    def predict_landing_position(posX, posY, posZ, velX, velY, velZ):
+    def predict_landing_position(self,posX, posY, posZ, velX, velY, velZ):
 
-        input_data = pd.DataFrame([[posX, posY, posZ, velX, velY, velZ]],
-                                columns=['posX', 'posY', 'posZ', 'velX', 'velY', 'velZ'])
+
         
         # 標準化
-        input_scaled = self.scaler.transform(input_data)
+        input_array = np.array([[posX, posY, posZ, velX, velY, velZ]])
+        input_scaled = self.scaler.transform(input_array)
         prediction = self.model.predict(input_scaled)
         return (round(prediction[0,0], 2),
                 round(prediction[0,1], 2),
                 round(prediction[0,2], 2))
     def auto_go_to_goal(self):
         x, y, z = self.goal_ball
-
+        goal_1=z
+        goal_2=-z
         if y > 0.15:
-            goal=-z
+            
             if x > 0.06:
-                self.goal_s4=goal
+                self.goal_s4=goal_1
             elif x < 0.06: 
-                self.goal_s5=goal
+                self.goal_s5=goal_1
             else:
-                self.goal_s6=goal           
+                self.goal_s6=goal_1        
         elif y < 0.15:
             if x > 0.06:
-                self.goal_s1=goal
+                self.goal_s1=goal_2
             elif x < 0.06: 
-                self.goal_s2=goal
+                self.goal_s2=goal_2
             else:
-                self.goal_s3=goal   
+                self.goal_s3=goal_2   
+        for name in ['goal_s1','goal_s2','goal_s3','goal_s4','goal_s5','goal_s6']:
+            self.publish_goal(name, getattr(self, name))
 def main():
     rclpy.init()
     while True:
