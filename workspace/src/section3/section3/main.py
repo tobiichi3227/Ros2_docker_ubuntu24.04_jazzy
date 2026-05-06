@@ -7,6 +7,7 @@ import termios
 import tty
 import select
 from rclpy.executors import SingleThreadedExecutor
+import onnxruntime as ort
 import numpy as np
 import joblib
 from geometry_msgs.msg import Point
@@ -27,6 +28,7 @@ class State(Node):
         self.bottom_board_y = 0.042
         self.top_board_y = 0.312
         self.model = joblib.load(model_path)
+        self.sess = ort.InferenceSession("/workspace/src/model.onnx")
         self.mode = None
         self.ball_p = [0.0, 0.0, 0.0]
         self.ball_v = [0.0, 0.0, 0.0]
@@ -114,12 +116,23 @@ class State(Node):
             self.ai_control_timer = self.create_timer(0.001, self.update_math_control)
 
     def update_ai_control(self):
-        goal = self.predict_landing_position(
-            self.ball_p[0], self.ball_p[1], self.ball_p[2],
-            self.ball_v[0], self.ball_v[1], self.ball_v[2]
-        )
-        self.goal_ball = goal
-        self.auto_go_to_goal()
+        inputs = {
+            "x": np.array([[self.ball_p[0]]], np.float64),
+            "y": np.array([[self.ball_p[1]]], np.float64),
+            "z": np.array([[self.ball_p[2]]], np.float64),
+            "vx": np.array([[self.ball_v[0]]], np.float64),
+            "vy": np.array([[self.ball_v[1]]], np.float64),
+            "vz": np.array([[self.ball_v[2]]], np.float64),
+        }
+        pz = float(self.sess.run(None, inputs)[0][0][0])
+        if self.ball_v[1] > 0:
+            self.publish_goal('goal_s4', -pz)
+            self.publish_goal('goal_s5', -pz)
+            self.publish_goal('goal_s6', -pz)
+        else:
+            self.publish_goal('goal_s1', pz)
+            self.publish_goal('goal_s2', pz)
+            self.publish_goal('goal_s3', pz)
 
     def predict_landing_position(self, posX, posY, posZ, velX, velY, velZ):
         def binarize(v):
